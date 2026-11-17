@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16a34a">
+<title>Quiet Check</title>
+<style>
+  :root { color-scheme: dark; --bg:#15803d; --panel:rgba(0,0,0,.20); }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100svh; font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    color:white; background:var(--bg); display:grid; place-items:center; padding:24px;
+    transition:background .18s ease; overflow-x:hidden; }
+  body.medium { background:#b7791f; }
+  body.loud { background:#b91c1c; }
+  .wrap { width:min(100%,430px); text-align:center; }
+  .eyebrow { opacity:.8; font-size:.78rem; letter-spacing:.18em; font-weight:800; }
+  h1 { margin:8px 0 4px; font-size:2.25rem; letter-spacing:-.05em; }
+  .sub { opacity:.85; margin:0 0 28px; }
+  .meter { width:230px; height:230px; border:9px solid rgba(255,255,255,.28); border-radius:50%;
+    margin:0 auto 22px; display:grid; place-items:center; background:var(--panel);
+    box-shadow:0 18px 55px rgba(0,0,0,.16); }
+  .number { font-size:4rem; line-height:1; font-weight:850; font-variant-numeric:tabular-nums; }
+  .unit { opacity:.8; margin-top:8px; font-weight:700; }
+  .status { font-size:1.25rem; font-weight:800; min-height:32px; }
+  .bar { height:12px; border-radius:99px; background:rgba(255,255,255,.22); overflow:hidden; margin:14px 0 26px; }
+  .fill { height:100%; width:0%; background:white; border-radius:99px; transition:width .08s linear; }
+  button { border:0; border-radius:16px; padding:16px 22px; width:100%; color:#102014;
+    background:white; font-size:1.05rem; font-weight:850; cursor:pointer; }
+  button:disabled { opacity:.55; }
+  .hint { margin:16px 0 0; font-size:.84rem; line-height:1.5; opacity:.85; }
+  .settings { margin-top:24px; padding:16px; border-radius:18px; background:var(--panel); text-align:left; }
+  .settings label { display:flex; justify-content:space-between; gap:12px; font-weight:700; font-size:.9rem; }
+  input { width:100%; margin-top:14px; accent-color:white; }
+  .note { font-size:.76rem; opacity:.75; margin-top:12px; line-height:1.45; }
+  @keyframes alarmShake { 0%,100%{transform:translate(0,0) rotate(0)} 20%{transform:translate(-5px,2px) rotate(-.6deg)}
+    40%{transform:translate(5px,-2px) rotate(.6deg)} 60%{transform:translate(-4px,-1px) rotate(-.4deg)}
+    80%{transform:translate(4px,1px) rotate(.4deg)} }
+  body.loud .wrap { animation:alarmShake .28s infinite; }
+  @media (prefers-reduced-motion:reduce) { body.loud .wrap { animation:none; } }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <div class="eyebrow">LIVE SOUND METER</div>
+  <h1>Quiet Check</h1>
+  <p class="sub">Your room, measured in real time.</p>
+  <div class="meter" aria-live="polite">
+    <div><div class="number" id="reading">—</div><div class="unit">relative dB</div></div>
+  </div>
+  <div class="status" id="status">Microphone is off</div>
+  <div class="bar"><div class="fill" id="fill"></div></div>
+  <button id="toggle">Start listening</button>
+  <p class="hint" id="hint">Tap start and allow microphone access. Listening happens only while this app is open and active.</p>
+  <section class="settings">
+    <label for="threshold"><span>Red alert sensitivity</span><span id="thresholdValue">−25 dB</span></label>
+    <input id="threshold" type="range" min="-45" max="-8" value="-25">
+    <div class="note">Move the slider left to make the red alert trigger more easily, or right to make it trigger only for louder sounds.</div>
+  </section>
+  <p class="note">This is a relative microphone level (dBFS), not a calibrated sound-pressure reading in dB SPL. Results vary by device and microphone.</p>
+</main>
+<script>
+(() => {
+  const body = document.body;
+  const button = document.getElementById('toggle');
+  const reading = document.getElementById('reading');
+  const status = document.getElementById('status');
+  const fill = document.getElementById('fill');
+  const hint = document.getElementById('hint');
+  const slider = document.getElementById('threshold');
+  const thresholdValue = document.getElementById('thresholdValue');
+  let stream = null, audioContext = null, analyser = null, frame = null, data = null, running = false;
+  let threshold = Number(slider.value);
+
+  slider.addEventListener('input', () => {
+    threshold = Number(slider.value);
+    thresholdValue.textContent = `${threshold} dB`;
+  });
+
+  function stopListening(message = 'Microphone is off') {
+    running = false;
+    if (frame !== null) cancelAnimationFrame(frame);
+    frame = null;
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    stream = null;
+    if (audioContext) audioContext.close().catch(() => {});
+    audioContext = null; analyser = null; data = null;
+    body.classList.remove('medium', 'loud');
+    reading.textContent = '—';
+    fill.style.width = '0%';
+    status.textContent = message;
+    button.textContent = 'Start listening';
+    hint.textContent = 'Microphone stopped. Tap start whenever you want to measure sound again.';
+    document.querySelector('meta[name="theme-color"]').content = '#15803d';
+  }
+
+  function update() {
+    if (!running || !analyser) return;
+    analyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) {
+      const sample = (data[i] - 128) / 128;
+      sum += sample * sample;
+    }
+    const rms = Math.sqrt(sum / data.length);
+    const db = rms > 0 ? 20 * Math.log10(rms) : -90;
+    const shown = Math.max(-90, Math.min(0, db));
+    reading.textContent = Math.round(shown);
+    fill.style.width = `${Math.max(0, Math.min(100, (shown + 60) / 60 * 100))}%`;
+
+    body.classList.remove('medium', 'loud');
+    if (shown >= threshold) {
+      body.classList.add('loud');
+      status.textContent = 'TOO LOUD';
+      document.querySelector('meta[name="theme-color"]').content = '#b91c1c';
+    } else if (shown >= threshold - 12) {
+      body.classList.add('medium');
+      status.textContent = 'Getting louder';
+      document.querySelector('meta[name="theme-color"]').content = '#b7791f';
+    } else {
+      status.textContent = 'Quiet';
+      document.querySelector('meta[name="theme-color"]').content = '#15803d';
+    }
+    frame = requestAnimationFrame(update);
+  }
+
+  button.addEventListener('click', async () => {
+    if (running) { stopListening(); return; }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      status.textContent = 'Microphone unavailable';
+      hint.textContent = 'Open this page in a browser that supports microphone access, using HTTPS or localhost.';
+      return;
+    }
+    button.disabled = true;
+    status.textContent = 'Requesting microphone…';
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      await audioContext.resume();
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 2048;
+      audioContext.createMediaStreamSource(stream).connect(analyser);
+      data = new Uint8Array(analyser.fftSize);
+      running = true;
+      button.textContent = 'Stop listening';
+      status.textContent = 'Listening…';
+      hint.textContent = 'Listening is active. Leave this page or switch apps and the microphone will stop.';
+      update();
+    } catch (err) {
+      stopListening(err.name === 'NotAllowedError' ? 'Microphone permission denied' : 'Could not start microphone');
+      hint.textContent = 'Check your browser microphone permission, then try again.';
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && running) stopListening('Paused — app is not active');
+  });
+  window.addEventListener('pagehide', () => { if (running) stopListening('Microphone is off'); });
+})();
+</script>
+</body>
+</html>
